@@ -4,6 +4,7 @@ from sqlalchemy import func
 from .database import Base, engine, get_db
 from .models import Vendor, PurchaseOrder, PurchaseOrderItem
 from .analytics import vendor_performance
+from app import analytics
 
 Base.metadata.create_all(bind=engine)
 app = FastAPI(title="VendorPulse Management API", version="1.0.0",
@@ -65,3 +66,47 @@ def risks(risk_tier: str | None = Query(None, pattern="^(High|Medium|Low|Insuffi
         rows = [x for x in rows if x["risk_tier"] == risk_tier]
     rows.sort(key=lambda x: (x["risk_score"] is None, -(x["risk_score"] or 0)))
     return {"total": len(rows), "limit": limit, "offset": offset, "items": rows[offset:offset+limit]}
+@app.get("/api/analytics/vendor-scorecard")
+def get_vendor_scorecard(
+    vendor_id: str,
+    db: Session = Depends(get_db),
+):
+    result = analytics.vendor_scorecard(db, vendor_id)
+
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Vendor not found",
+        )
+
+    return result
+
+
+@app.get("/api/analytics/delivery-trends")
+def get_delivery_trends(
+    db: Session = Depends(get_db),
+):
+    return analytics.delivery_trends(db)
+
+
+@app.get("/api/analytics/top-vendors")
+def get_top_vendors(
+    limit: int = Query(default=10, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    return analytics.top_vendors(db, limit)
+
+
+@app.get("/api/analytics/risk-distribution")
+def get_risk_distribution(
+    db: Session = Depends(get_db),
+):
+    return analytics.risk_distribution(db)
+
+
+@app.get("/api/analytics/late-orders")
+def get_late_orders(
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    return analytics.late_orders(db, limit)

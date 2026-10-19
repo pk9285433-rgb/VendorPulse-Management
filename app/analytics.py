@@ -9,6 +9,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .models import Vendor, PurchaseOrder, PurchaseOrderItem, Review
+from collections import Counter , defaultdict
 
 
 def vendor_performance(db: Session):
@@ -163,3 +164,161 @@ def vendor_performance(db: Session):
         )
 
     return results
+def vendor_scorecard(db: Session, vendor_id: str):
+    rows = vendor_performance(db)
+
+    for row in rows:
+        if row["vendor_id"] == vendor_id:
+            return row
+
+    return None
+def top_vendors(db: Session, limit: int = 10):
+    rows = vendor_performance(db)
+
+    eligible = [
+        row for row in rows
+        if row["on_time_delivery_pct"] is not None
+    ]
+
+    eligible.sort(
+        key=lambda row: (
+            row["on_time_delivery_pct"],
+            row["average_review_score"]
+            if row["average_review_score"] is not None else -1,
+            row["order_count"],
+        ),
+        reverse=True,
+    )
+
+    return [
+        {**row, "rank": index + 1}
+        for index, row in enumerate(eligible[:limit])
+    ]
+def risk_distribution(db: Session):
+    rows = vendor_performance(db)
+    counts = Counter(row["risk_tier"] for row in rows)
+
+    return {
+        "total_vendors": len(rows),
+        "risk_distribution": [
+            {
+                "risk_tier": tier,
+                "vendor_count": counts.get(tier, 0),
+            }
+            for tier in (
+                "High",
+                "Medium",
+                "Low",
+                "Insufficient Data",
+            )
+        ],
+    }
+def delivery_trends(db: Session):
+    rows = (
+        db.query(
+            PurchaseOrderItem.vendor_id,
+            PurchaseOrder.order_id,
+            PurchaseOrder.delivered_customer_date,
+            PurchaseOrder.estimated_delivery_date,
+        )
+        .join(
+            PurchaseOrder,
+            PurchaseOrder.order_id == PurchaseOrderItem.order_id,
+        )
+        .filter(
+            PurchaseOrder.delivered_customer_date.isnot(None)
+        )
+        .distinct()
+        .all()
+    )
+
+    monthly = defaultdict(lambda: {
+        "delivered_orders": 0,
+        "on_time_orders": 0,
+        "late_orders": 0,
+        "orders_without_estimate": 0,
+    })
+
+    seen = set()
+
+    for row in rows:
+        key = (row.vendor_id, row.order_id)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        month = row.delivered_customer_date.strftime("%Y-%m")
+        stats = monthly[month]
+        stats["delivered_orders"] += 1
+
+        if row.estimated_delivery_date is None:
+            stats["orders_without_estimate"] += 1
+        elif row.delivered_customer_date <= row.estimated_delivery_date:
+            stats["on_time_orders"] += 1
+        else:
+            stats["late_orders"] += 1
+
+    return [
+        {"month": month, **monthly[month]}
+        for month in sorted(monthly)
+    ]
+
+def late_orders(db: Session, limit: int = 100):
+    rows = (
+        db.query(
+            PurchaseOrderItem.vendor_id,
+            PurchaseOrder.order_id,
+            PurchaseOrder.purchase_timestamp,
+            PurchaseOrder.delivered_customer_date,
+            PurchaseOrder.estimated_delivery_date,
+        )
+        .join(
+            PurchaseOrder,
+            PurchaseOrder.order_id == PurchaseOrderItem.order_id,
+        )
+        .filter(
+            PurchaseOrder.delivered_customer_date.isnot(None),
+            PurchaseOrder.estimated_delivery_date.isnot(None),
+        )
+        .distinct()
+        .all()
+    )
+
+    result = []
+    seen = set()
+
+    for row in rows:
+        key = (row.vendor_id, row.order_id)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        if row.delivered_customer_date > row.estimated_delivery_date:
+            result.append({
+                "vendor_id": row.vendor_id,
+                "order_id": row.order_id,
+                "purchase_timestamp": (
+                    row.purchase_timestamp.isoformat()
+                    if row.purchase_timestamp else None
+                ),
+                "estimated_delivery_date": (
+                    row.estimated_delivery_date.isoformat()
+                ),
+                "delivered_customer_date": (
+                    row.delivered_customer_date.isoformat()
+                ),
+                "delay_days": (
+                    row.delivered_customer_date
+                    - row.estimated_delivery_date
+                ).total_seconds() / 86400,
+            })
+
+    result.sort(
+        key=lambda row: row["delay_days"],
+        reverse=True,
+    )
+
+    return result[:limit]
